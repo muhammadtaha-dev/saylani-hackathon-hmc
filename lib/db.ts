@@ -89,7 +89,11 @@ const emptyDb = (): DbShape => ({
 });
 
 function dataDir(): string {
-  return process.env.DATA_DIR || path.join(process.cwd(), "data");
+  // Vercel's serverless filesystem is read-only outside /tmp; use a temp dir
+  // there (persists for the life of the warm instance). Local runs use ./data.
+  if (process.env.DATA_DIR) return process.env.DATA_DIR;
+  if (process.env.VERCEL === "1") return "/tmp/hcm-data";
+  return path.join(process.cwd(), "data");
 }
 
 function dbFile(): string {
@@ -97,18 +101,31 @@ function dbFile(): string {
 }
 
 let cache: DbShape | null = null;
+let cacheMtime = 0;
 let writeChain: Promise<void> = Promise.resolve();
 
+// Each route bundle holds its own module instance, so a load-once cache goes
+// stale the moment another route flushes. Reload whenever the file's mtime
+// moved (stat is cheap at demo scale; correctness beats caching here).
 function load(): DbShape {
-  if (cache) return cache;
+  let mtime: number | null = null;
   try {
-    const raw = fs.readFileSync(dbFile(), "utf8");
-    const parsed = JSON.parse(raw) as Partial<DbShape>;
-    cache = { ...emptyDb(), ...parsed };
+    mtime = fs.statSync(dbFile()).mtimeMs;
   } catch {
-    cache = emptyDb();
+    mtime = null;
   }
-  return cache;
+  let result: DbShape = cache ?? emptyDb();
+  if (!cache || (mtime !== null && mtime !== cacheMtime)) {
+    try {
+      const raw = fs.readFileSync(dbFile(), "utf8");
+      result = { ...emptyDb(), ...(JSON.parse(raw) as Partial<DbShape>) };
+      cache = result;
+      cacheMtime = mtime ?? 0;
+    } catch {
+      if (!cache) cache = result;
+    }
+  }
+  return result;
 }
 
 function flush(): Promise<void> {
@@ -122,6 +139,7 @@ function flush(): Promise<void> {
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(tmp, json, "utf8");
       fs.renameSync(tmp, file);
+      cacheMtime = fs.statSync(file).mtimeMs;
     })
     .catch((e) => {
       // Persist failures are surfaced but never crash a request mid-handler.

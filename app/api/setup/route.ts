@@ -1,10 +1,15 @@
 import { z } from "zod";
+import { connection } from "next/server";
 import { db } from "@/lib/db";
 import { ok, fail, parseBody, readJson, ApiError } from "@/lib/api";
 import { performSetup } from "@/lib/services/setup";
 
-// GET /api/setup/status -> { initialized }
+// GET /api/setup -> { initialized }. Reads live DB state; connection() keeps
+// this GET out of build-time prerendering so a fresh install is detected live.
 export async function GET() {
+  // Keep connection() outside try/catch: during build-time prerender probing
+  // it rejects intentionally, and that rejection must reach the framework.
+  await connection();
   try {
     return ok({ initialized: db.company.get() !== null, companyName: db.company.get()?.name ?? null });
   } catch (e) {
